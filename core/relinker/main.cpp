@@ -27,7 +27,9 @@
 #include <filesystem>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -36,6 +38,22 @@
 #endif
 
 namespace {
+
+std::filesystem::path ResolveOutputPath(std::filesystem::path path) {
+    path = std::filesystem::weakly_canonical(path);
+    std::set<std::filesystem::path> links;
+    while (std::filesystem::is_symlink(std::filesystem::symlink_status(path))) {
+        if (!links.insert(path).second) throw Domain::RelinkerException("Cyclic output symbolic link: " + Io::Utf8Path(path));
+        const auto target = std::filesystem::read_symlink(path);
+        path = std::filesystem::weakly_canonical(target.is_absolute() ? target : path.parent_path() / target);
+    }
+    return path;
+}
+
+bool PathsReferToSameFile(const std::filesystem::path& first, const std::filesystem::path& second) {
+    if (ResolveOutputPath(first) == ResolveOutputPath(second)) return true;
+    return std::filesystem::exists(first) && std::filesystem::exists(second) && std::filesystem::equivalent(first, second);
+}
 
 int Run(const int argc, char* argv[]) {
     Cli::Args args;
@@ -113,13 +131,26 @@ int Run(const int argc, char* argv[]) {
 
         if (args.writeRegistry) {
             const std::filesystem::path outFsPath = Io::NativePath(absPath);
-            const std::string registryPath = Io::Utf8Path(outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + ".registry.json"));
+            const auto registryPath = outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + ".registry.json");
             const auto registryWriter = std::make_shared<Relinker::CallRegistryWriter>();
-            fileWriter.Write(registryPath, registryWriter->WriteCallRegistry(result.RegistryEntries));
+            std::vector<std::pair<std::filesystem::path, std::string>> registries;
+            registries.emplace_back(registryPath, registryWriter->WriteCallRegistry(result.RegistryEntries));
+            std::vector<std::filesystem::path> inputs{Io::NativePath(args.inputPath)};
+            std::vector<std::filesystem::path> outputs{outFsPath};
             for (const auto& artifact : guestArtifacts) {
                 const auto modulePath = outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + "." + Io::Utf8Path(artifact.Path.filename()) + ".registry.json");
-                fileWriter.Write(Io::Utf8Path(modulePath), registryWriter->WriteModuleImports(artifact.Imports));
+                registries.emplace_back(modulePath, registryWriter->WriteModuleImports(artifact.Imports));
+                inputs.push_back(artifact.SourcePath);
+                outputs.push_back(artifact.Path);
             }
+            for (const auto& [path, content] : registries) {
+                for (const auto& input : inputs)
+                    if (PathsReferToSameFile(path, input)) throw Domain::RelinkerException("Registry output would overwrite an input file: " + Io::Utf8Path(path));
+                for (const auto& output : outputs)
+                    if (PathsReferToSameFile(path, output)) throw Domain::RelinkerException("Registry output collides with another output: " + Io::Utf8Path(path));
+                outputs.push_back(path);
+            }
+            for (const auto& [path, content] : registries) fileWriter.Write(Io::Utf8Path(path), content);
         }
 
         auto byteWriter = std::make_shared<Io::ByteWriter>();
