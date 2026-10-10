@@ -113,18 +113,12 @@ void KernelEqueuePrivate::WaitForDescriptors(std::unique_lock<std::mutex>& lock,
     }
 }
 
-int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
-    std::unique_lock lock(m_mutex);
-    if (m_closed) {
-        return SCE_KERNEL_ERROR_EBADF;
-    }
-    TriggerExpiredTimers(MonotonicNs());
-    PollEvents();
+int KernelEqueuePrivate::CollectTriggered(KernelEvent* ev, int num) {
     int ret = 0;
-    for (auto it = m_events.begin(); it != m_events.end();) {
+    for (auto it = m_events.begin(); it != m_events.end() && ret < num;) {
         auto& e = *it;
         bool erase = false;
-        while (e.triggered) {
+        while (e.triggered && ret < num) {
             ev[ret++] = e.event;
             if ((e.event.flags & EV_ONESHOT) != 0) {
                 erase = true;
@@ -137,21 +131,26 @@ int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
                 e.event.fflags = 0;
                 e.event.data = 0;
             }
-            if (!e.pendingEvents.empty()) {
-                e.event = e.pendingEvents.front();
-                e.pendingEvents.pop_front();
-                e.triggered = true;
-            }
-            if (ret >= num) {
+            if (e.pendingEvents.empty()) {
                 break;
             }
+            e.event = e.pendingEvents.front();
+            e.pendingEvents.pop_front();
+            e.triggered = true;
         }
         it = erase ? m_events.erase(it) : std::next(it);
-        if (ret >= num) {
-            break;
-        }
     }
     return ret;
+}
+
+int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
+    std::unique_lock lock(m_mutex);
+    if (m_closed) {
+        return SCE_KERNEL_ERROR_EBADF;
+    }
+    TriggerExpiredTimers(MonotonicNs());
+    PollEvents();
+    return CollectTriggered(ev, num);
 }
 
 int KernelEqueuePrivate::WaitForEvents(KernelEvent* ev, int num, uint32_t micros) {
@@ -163,34 +162,7 @@ int KernelEqueuePrivate::WaitForEvents(KernelEvent* ev, int num, uint32_t micros
     for (;;) {
         TriggerExpiredTimers(MonotonicNs());
         const bool polling = PollEvents();
-        int ret = 0;
-        for (auto it = m_events.begin(); it != m_events.end() && ret < num;) {
-            auto& e = *it;
-            bool erase = false;
-            while (e.triggered) {
-                ev[ret++] = e.event;
-                if ((e.event.flags & EV_ONESHOT) != 0) {
-                    erase = true;
-                    break;
-                }
-                if (e.filter.resetFunc != nullptr) {
-                    e.filter.resetFunc(&e);
-                } else if ((e.event.flags & EV_CLEAR) != 0) {
-                    e.triggered = false;
-                    e.event.fflags = 0;
-                    e.event.data = 0;
-                }
-                if (!e.pendingEvents.empty()) {
-                    e.event = e.pendingEvents.front();
-                    e.pendingEvents.pop_front();
-                    e.triggered = true;
-                }
-                if (ret >= num) {
-                    break;
-                }
-            }
-            it = erase ? m_events.erase(it) : std::next(it);
-        }
+        const int ret = CollectTriggered(ev, num);
         if (ret != 0) {
             return ret;
         }
