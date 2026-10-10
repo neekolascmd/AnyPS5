@@ -476,6 +476,10 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
         p->affinity.store((*attr)->_affinity, std::memory_order_relaxed);
         p->priority.store((*attr)->_schedpriority, std::memory_order_relaxed);
     }
+    if (attr && (*attr)->_inheritsched != GUEST_INHERIT_SCHED)
+        p->scope = (*attr)->_scope;
+    else if (CurrentGuestState().current)
+        p->scope = CurrentGuestState().current->scope;
     if (name) p->name = name;
     std::promise<bool> start;
     auto args = std::make_unique<ThreadArgs>(ThreadArgs{entry, arg, p.get()});
