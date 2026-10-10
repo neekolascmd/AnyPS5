@@ -77,6 +77,10 @@ struct PthreadSemPrivate {
 
 static constexpr KernelCpumask DEFAULT_THREAD_AFFINITY = 0x1FFF;
 static constexpr int DEFAULT_THREAD_PRIORITY = 700;
+static constexpr int GUEST_EXPLICIT_SCHED = 0;
+static constexpr int GUEST_INHERIT_SCHED = 4;
+static constexpr int GUEST_SCOPE_PROCESS = 0;
+static constexpr int GUEST_SCOPE_SYSTEM = 2;
 static constexpr std::uint32_t CPU_CLOCK_BIT = 0x80000000u;
 static constexpr std::uint32_t CPU_CLOCK_PROCESS_BIT = 0x40000000u;
 static constexpr std::uint32_t CPU_CLOCK_ID_MASK = ~(CPU_CLOCK_BIT | CPU_CLOCK_PROCESS_BIT);
@@ -95,6 +99,7 @@ struct PthreadAttrPrivate {
     int _schedpriority;
     int _schedpolicy;
     int _inheritsched;
+    int _scope = GUEST_SCOPE_SYSTEM;
     KernelCpumask _affinity = DEFAULT_THREAD_AFFINITY;
     std::size_t _guardsize = 0x1000;
     int _solosched = 0;
@@ -119,6 +124,7 @@ struct PthreadPrivate {
     std::atomic<int> waitCount{0};
     std::atomic<KernelCpumask> affinity{DEFAULT_THREAD_AFFINITY};
     std::atomic<int> priority{DEFAULT_THREAD_PRIORITY};
+    int scope = GUEST_SCOPE_SYSTEM;
     int cpuClockThread = 0;
 #ifndef _WIN32
     clockid_t hostCpuClock{};
