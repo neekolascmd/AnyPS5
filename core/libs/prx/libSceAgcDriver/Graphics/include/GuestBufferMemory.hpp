@@ -43,6 +43,7 @@ struct ImportProbe {
     std::uint32_t pages = 0;
     std::uint32_t writtenAtImport = 0;
     std::uint32_t writtenAfterSubmit = 0;
+    std::uint32_t writtenByGpu = 0;
     std::uint32_t writtenByCpu = 0;
 };
 
