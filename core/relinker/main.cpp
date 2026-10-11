@@ -51,8 +51,10 @@ std::filesystem::path ResolveOutputPath(std::filesystem::path path) {
 }
 
 bool PathsReferToSameFile(const std::filesystem::path& first, const std::filesystem::path& second) {
-    if (ResolveOutputPath(first) == ResolveOutputPath(second)) return true;
-    return std::filesystem::exists(first) && std::filesystem::exists(second) && std::filesystem::equivalent(first, second);
+    const auto firstPath = ResolveOutputPath(first);
+    const auto secondPath = ResolveOutputPath(second);
+    if (firstPath == secondPath) return true;
+    return std::filesystem::exists(firstPath) && std::filesystem::exists(secondPath) && std::filesystem::equivalent(firstPath, secondPath);
 }
 
 int Run(const int argc, char* argv[]) {
