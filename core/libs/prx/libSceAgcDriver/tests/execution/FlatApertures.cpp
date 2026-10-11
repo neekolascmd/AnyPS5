@@ -11,6 +11,7 @@
 #endif
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -476,17 +478,36 @@ std::vector<Row> Rows() {
     return rows;
 }
 
+std::uint32_t ParseShardArgument(const char* argument) {
+    const std::string_view text(argument);
+    std::uint32_t value = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    Require(parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size(), "flat apertures: invalid shard argument");
+    return value;
 }
 
-int main() {
+}
+
+int main(int argc, char** argv) {
     try {
+        const auto rows = Rows();
+        std::uint32_t shard = 0;
+        std::uint32_t shards = 1;
+        if (argc != 1) {
+            Require(argc == 4 && std::string_view(argv[1]) == "--shard", "usage: flat_apertures [--shard index count]");
+            shard = ParseShardArgument(argv[2]);
+            shards = ParseShardArgument(argv[3]);
+            Require(shards != 0 && shards <= rows.size() && shard < shards, "flat apertures: invalid shard range");
+        }
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         const bool wave64 = device->Target().subgroupSize >= 32u;
         GuestBlock guest;
         std::size_t checked = 0;
-        for (const Row& row : Rows()) {
+        for (std::size_t index = shard; index < rows.size(); index += shards) {
+            const auto& row = rows[index];
             if (row.waveSize == 64u && !wave64) continue;
+            std::cout << "flat aperture row " << index << ": " << Describe(row) << std::endl;
             Run(*device, row, guest);
             ++checked;
         }
