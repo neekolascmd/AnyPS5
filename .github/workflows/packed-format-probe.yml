@@ -1,0 +1,60 @@
+name: Packed texture format probe
+on:
+  push:
+    branches: [codex/probe-packed-formats]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: git submodule update --init --depth 1 3rdparty/Vulkan-Headers
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+      - name: Query packed-format support on the runtime device
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/format-probe.cpp" <<'CPP'
+          #include <vulkan/vulkan.h>
+          #include <array>
+          #include <cstdint>
+          #include <cstdio>
+          #include <vector>
+          int main() {
+              VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+              application.apiVersion = VK_API_VERSION_1_1;
+              VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+              info.pApplicationInfo = &application;
+              VkInstance instance;
+              if (vkCreateInstance(&info, nullptr, &instance) != VK_SUCCESS) return 1;
+              std::uint32_t count = 0;
+              if (vkEnumeratePhysicalDevices(instance, &count, nullptr) != VK_SUCCESS || !count) return 1;
+              std::vector<VkPhysicalDevice> devices(count);
+              if (vkEnumeratePhysicalDevices(instance, &count, devices.data()) != VK_SUCCESS) return 1;
+              const std::array formats{VK_FORMAT_R4G4B4A4_UNORM_PACK16, VK_FORMAT_B4G4R4A4_UNORM_PACK16,
+                                       VK_FORMAT_R5G6B5_UNORM_PACK16, VK_FORMAT_A1R5G5B5_UNORM_PACK16,
+                                       VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_A4R4G4B4_UNORM_PACK16,
+                                       VK_FORMAT_A4B4G4R4_UNORM_PACK16};
+              for (const auto device : devices) {
+                  VkPhysicalDeviceProperties properties;
+                  vkGetPhysicalDeviceProperties(device, &properties);
+                  std::printf("device: %s\n", properties.deviceName);
+                  for (const auto format : formats) {
+                      VkFormatProperties features;
+                      vkGetPhysicalDeviceFormatProperties(device, format, &features);
+                      VkImageFormatProperties image;
+                      const auto result = vkGetPhysicalDeviceImageFormatProperties(device, format, VK_IMAGE_TYPE_2D,
+                          VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 0, &image);
+                      std::printf("format %d: optimal=0x%x sampled=%d transfer-dst=%d image-result=%d\n", format,
+                          features.optimalTilingFeatures, !!(features.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
+                          !!(features.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT), result);
+                  }
+              }
+              vkDestroyInstance(instance, nullptr);
+          }
+          CPP
+          g++ -std=c++20 -O2 -I 3rdparty/Vulkan-Headers/include "$RUNNER_TEMP/format-probe.cpp" -l:libvulkan.so.1 -o "$RUNNER_TEMP/format-probe"
+          timeout 30 "$RUNNER_TEMP/format-probe"
