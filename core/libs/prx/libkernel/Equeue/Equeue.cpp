@@ -115,7 +115,9 @@ void KernelEqueuePrivate::WaitForDescriptors(std::unique_lock<std::mutex>& lock,
 
 int KernelEqueuePrivate::CollectTriggered(KernelEvent* ev, int num) {
     int ret = 0;
-    for (auto it = m_events.begin(); it != m_events.end() && ret < num;) {
+    const auto eventsToScan = m_events.size();
+    for (std::size_t scanned = 0; scanned < eventsToScan && ret < num; ++scanned) {
+        const auto it = m_events.begin();
         auto& e = *it;
         bool erase = false;
         while (e.triggered && ret < num) {
@@ -138,7 +140,8 @@ int KernelEqueuePrivate::CollectTriggered(KernelEvent* ev, int num) {
             e.pendingEvents.pop_front();
             e.triggered = true;
         }
-        it = erase ? m_events.erase(it) : std::next(it);
+        if (erase) m_events.erase(it);
+        else m_events.splice(m_events.end(), m_events, it);
     }
     return ret;
 }
