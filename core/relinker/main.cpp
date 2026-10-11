@@ -54,7 +54,11 @@ bool PathsReferToSameFile(const std::filesystem::path& first, const std::filesys
     const auto firstPath = ResolveOutputPath(first);
     const auto secondPath = ResolveOutputPath(second);
     if (firstPath == secondPath) return true;
-    return std::filesystem::exists(firstPath) && std::filesystem::exists(secondPath) && std::filesystem::equivalent(firstPath, secondPath);
+    if (!std::filesystem::exists(firstPath) || !std::filesystem::exists(secondPath)) return false;
+    std::error_code error;
+    const auto same = std::filesystem::equivalent(firstPath, secondPath, error);
+    if (error) throw Domain::RelinkerException("Cannot verify registry output path: " + Io::Utf8Path(firstPath) + ": " + error.message());
+    return same;
 }
 
 int Run(const int argc, char* argv[]) {
