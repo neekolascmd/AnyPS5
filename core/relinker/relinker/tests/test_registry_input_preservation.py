@@ -119,8 +119,11 @@ def main():
                 output = case / ("output.exe" if windows else "output.elf")
                 result = subprocess.run([str(relinker), *options, "--registry", str(source), str(output)],
                                         capture_output=True, text=True, timeout=20)
+                rejected = "Registry output collides with another output:" in result.stderr
+                if os.name == "nt" and not existing:
+                    rejected |= "Cannot verify registry output path: " + str(registry) + ":" in result.stderr
                 if (result.returncode != 2
-                        or "Registry output collides with another output:" not in result.stderr
+                        or not rejected
                         or output.exists() or (case / "app0").exists()
                         or source.read_bytes() != main_fixture()
                         or sample.read_bytes() != guest_fixture(PLAIN_SITE)
