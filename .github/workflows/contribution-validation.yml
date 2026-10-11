@@ -46,3 +46,75 @@ jobs:
       - run: cmake -S . -B build-relinker -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DANYPS5_RELINKER_ONLY=ON -DBUILD_TESTING=ON
       - run: cmake --build build-relinker --parallel 3
       - run: ctest --test-dir build-relinker --output-on-failure --parallel 3 --timeout 30
+
+  runtime:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            job: linux
+            configure: -DANYPS5_ENABLE_SPIRV_TOOLS=ON
+          - os: windows-latest
+            job: windows
+            configure: ''
+    env:
+      WINLIBS_RELEASE: 15.2.0posix-14.0.0-ucrt-r7
+      WINLIBS_ZIP: winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-14.0.0-r7.zip
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - if: runner.os == 'Windows'
+        id: toolchain
+        uses: actions/cache@v6
+        with:
+          path: C:\winlibs
+          key: ${{ env.WINLIBS_ZIP }}
+      - if: runner.os == 'Windows' && steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/winlibs.zip" "https://github.com/brechtsanders/winlibs_mingw/releases/download/$WINLIBS_RELEASE/$WINLIBS_ZIP"
+          7z x "$RUNNER_TEMP/winlibs.zip" -oC:/winlibs > /dev/null
+      - if: runner.os == 'Windows'
+        run: |
+          echo 'C:\winlibs\mingw64\bin' >> "$GITHUB_PATH"
+          echo 'SSL_CERT_FILE=C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt' >> "$GITHUB_ENV"
+      - uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: development-runtime-${{ matrix.job }}
+          save: true
+          evict-old-files: job
+      - if: runner.os == 'Linux'
+        name: Install lavapipe for the GPU execution tests
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+          echo 'ANYPS5_REQUIRE_VULKAN=1' >> "$GITHUB_ENV"
+      - run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          ${{ matrix.configure }}
+      - run: python tools/check_test_registration.py build
+      - run: cmake --build build --parallel 3
+      - run: cmake --build build --target libs --parallel 3
+      - name: Test the complete runtime
+        run: ctest --test-dir build --output-on-failure --timeout 30 --parallel 4 --output-log ctest.log --output-junit ctest.xml
+        env:
+          GALLIUM_OVERRIDE_CPU_CAPS: avx
+      - if: ${{ !cancelled() && hashFiles('build/ctest.xml') != '' }}
+        run: python tools/check_skips.py build/ctest.xml --job ${{ matrix.job }}
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: runtime-${{ matrix.job }}-logs
+          path: |
+            ctest.log
+            build/ctest.xml
+            build/Testing/Temporary/
+            build/CMakeFiles/CMakeConfigureLog.yaml
