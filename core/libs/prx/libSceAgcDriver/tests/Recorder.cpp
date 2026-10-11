@@ -2294,17 +2294,22 @@ void importWatchTests(const Device& device) {
     }
     const auto probe = ProbeImportWriteProtection(context);
     Require(probe.failure == nullptr, std::string("(u) the import probe failed at ") + (probe.failure != nullptr ? probe.failure : "") + " (" + std::to_string(static_cast<int>(probe.result)) + ")");
-    std::cout << "import probe: " << probe.writtenAfterSubmit << " of " << probe.pages << " scratch pages written after a GPU read, " << probe.writtenAtImport << " after the import\n";
+    std::cout << "import probe: " << probe.writtenAfterSubmit << " of " << probe.pages << " scratch pages written after a GPU read, " << probe.writtenByGpu << " after a GPU write, " << probe.writtenAtImport << " after the import\n";
     Require(probe.writtenByCpu != 0, "(u) a CPU store after the import probe's GPU read was not collected");
     if (context.dmaBufImport) {
         const auto dmaBuf = ProbeDmaBufImportWriteProtection(context);
         Require(dmaBuf.failure == nullptr, std::string("(u) the dma-buf import probe failed at ") + (dmaBuf.failure != nullptr ? dmaBuf.failure : "") + " (" + std::to_string(static_cast<int>(dmaBuf.result)) + ")");
         Require(dmaBuf.writtenByCpu != 0, "(u) a CPU store into a dma-buf imported scratch range was not collected");
-        std::cout << "dma-buf import probe: " << dmaBuf.writtenAfterSubmit << " of " << dmaBuf.pages << " scratch pages written after a GPU read, " << dmaBuf.writtenAtImport << " after the import, " << dmaBuf.writtenByCpu << " after a CPU store\n";
+        std::cout << "dma-buf import probe: " << dmaBuf.writtenAfterSubmit << " of " << dmaBuf.pages << " scratch pages written after a GPU read, " << dmaBuf.writtenByGpu << " after a GPU write, " << dmaBuf.writtenAtImport << " after the import, " << dmaBuf.writtenByCpu << " after a CPU store\n";
     } else {
         std::cout << "dma-buf imports unavailable: the dma-buf import probe not tested\n";
     }
     const auto decided = PrepareImportWatch(context);
+    const char* requested = std::getenv("APS5_WRITE_WATCH_IMPORTS");
+    if (requested == nullptr || std::strcmp(requested, "probe") == 0) {
+        const bool unsafe = probe.writtenAfterSubmit != 0 || probe.writtenByGpu != 0 || probe.writtenByCpu == 0;
+        Require(decided == (unsafe ? ImportWatch::Unwatch : ImportWatch::Watch), "(u) the import decision ignored the read, write or CPU-store probe");
+    }
     struct Restore {
         const Context& context;
         ImportWatch decided;
