@@ -3,7 +3,7 @@
 ### Build
 
 - Building on Windows requires a specific version of mingw - MinGW-w64 GCC 15.2.0 (`winlibs-gcc15`, `x86_64-ucrt-posix-seh`)
-- GCC 15.2.0's Windows `std::filesystem` does not resolve symbolic links ([implementation](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libstdc%2B%2B-v3/src/filesystem/ops-common.h#L116-L120)). The [relinker's registry checks](../../core/relinker/main.cpp) reject dangling output links when file identity cannot be verified, before writing any registry or executable. A link whose target already exists is checked with `equivalent`.
+- GCC 15.2.0's Windows `std::filesystem` does not resolve symbolic links ([implementation](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libstdc%2B%2B-v3/src/filesystem/ops-common.h#L116-L120)), and `equivalent` can miss hard links with different filename-derived executable permissions ([comparison](https://github.com/gcc-mirror/gcc/blob/releases/gcc-15.2.0/libstdc%2B%2B-v3/src/c%2B%2B17/fs_ops.cc#L825-L839)). The [relinker's registry checks](../../core/relinker/main.cpp) compare native Windows file IDs for existing paths and reject dangling output links when file identity cannot be verified, before writing any registry or executable.
 - Even compiled prx libraries on Windows require nearby (static linking of these dependencies causes conflicts):
   - libgcc_s_seh-1.dll
   - libstdc++-6.dll
