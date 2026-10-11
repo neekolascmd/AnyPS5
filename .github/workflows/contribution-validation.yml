@@ -56,9 +56,11 @@ jobs:
         include:
           - os: ubuntu-latest
             job: linux
+            shell: bash
             configure: -DANYPS5_ENABLE_SPIRV_TOOLS=ON
           - os: windows-latest
             job: windows
+            shell: cmd
             configure: ''
     env:
       WINLIBS_RELEASE: 15.2.0posix-14.0.0-ucrt-r7
@@ -100,24 +102,32 @@ jobs:
           -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           ${{ matrix.configure }}
+        shell: ${{ matrix.shell }}
       - run: python tools/check_test_registration.py build
+        shell: ${{ matrix.shell }}
       - name: Build the changed kernel tests first
+        shell: ${{ matrix.shell }}
         run: >-
           cmake --build build --parallel 3 --target
           guest_equeue_event_tests guest_socket_event_tests guest_pthread_attr_tests guest_filesystem_tests
       - name: Validate the kernel contributions
+        shell: ${{ matrix.shell }}
         run: >-
-          ctest --test-dir build -R '^guest_(equeue_events|socket_events|pthread_attr|filesystem)$'
+          ctest --test-dir build -R "^guest_(equeue_events|socket_events|pthread_attr|filesystem)$"
           --output-on-failure --timeout 30 --parallel 2 --no-tests=error
           --output-log kernel-ctest.log --output-junit kernel-ctest.xml
       - run: cmake --build build --parallel 3
+        shell: ${{ matrix.shell }}
       - run: cmake --build build --target libs --parallel 3
+        shell: ${{ matrix.shell }}
       - name: Test the complete runtime
+        shell: ${{ matrix.shell }}
         run: ctest --test-dir build --output-on-failure --timeout 30 --parallel 4 --output-log ctest.log --output-junit ctest.xml
         env:
           GALLIUM_OVERRIDE_CPU_CAPS: avx
       - if: ${{ !cancelled() && hashFiles('build/ctest.xml') != '' }}
         run: python tools/check_skips.py build/ctest.xml --job ${{ matrix.job }}
+        shell: ${{ matrix.shell }}
       - if: ${{ !cancelled() && runner.os == 'Linux' && hashFiles('build/ctest.xml') != '' }}
         name: Capture uploads for a failing packed-texture test
         continue-on-error: true
