@@ -1,0 +1,187 @@
+name: Host import tracking probe
+on:
+  push:
+    branches: [codex/probe-host-import-writes]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: git submodule update --init --depth 1 3rdparty/Vulkan-Headers
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+      - name: Measure read and write faults with the actual guest write watcher
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/import-watch.cpp" <<'CPP'
+          #include "prx/libc/include/GuestWriteWatch.hpp"
+          #include <vulkan/vulkan.h>
+          #include <algorithm>
+          #include <cstdint>
+          #include <cstring>
+          #include <iostream>
+          #include <stdexcept>
+          #include <vector>
+          #include <sys/mman.h>
+          
+          void Check(VkResult result, const char* call) {
+              if (result != VK_SUCCESS) throw std::runtime_error(std::string(call) + ": " + std::to_string(result));
+          }
+          
+          int main() {
+              try {
+                  using namespace GuestWriteWatch;
+                  if (!GuestWriteWatchAvailable_nid_postfix()) throw std::runtime_error("write watch unavailable");
+                  VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+                  application.apiVersion = VK_API_VERSION_1_1;
+                  VkInstanceCreateInfo instanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+                  instanceInfo.pApplicationInfo = &application;
+                  VkInstance instance;
+                  Check(vkCreateInstance(&instanceInfo, nullptr, &instance), "vkCreateInstance");
+                  std::uint32_t count = 0;
+                  Check(vkEnumeratePhysicalDevices(instance, &count, nullptr), "vkEnumeratePhysicalDevices");
+                  if (!count) throw std::runtime_error("no Vulkan device");
+                  std::vector<VkPhysicalDevice> physicalDevices(count);
+                  Check(vkEnumeratePhysicalDevices(instance, &count, physicalDevices.data()), "vkEnumeratePhysicalDevices");
+                  const auto physical = physicalDevices.front();
+                  VkPhysicalDeviceExternalMemoryHostPropertiesEXT host{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
+                  VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &host};
+                  vkGetPhysicalDeviceProperties2(physical, &properties);
+                  std::cout << "device: " << properties.properties.deviceName << std::endl;
+                  vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, nullptr);
+                  std::vector<VkQueueFamilyProperties> families(count);
+                  vkGetPhysicalDeviceQueueFamilyProperties(physical, &count, families.data());
+                  std::uint32_t family = 0;
+                  while (family < count && !(families[family].queueFlags & VK_QUEUE_COMPUTE_BIT)) ++family;
+                  if (family == count) throw std::runtime_error("no compute queue");
+                  const float priority = 1;
+                  VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+                  queueInfo.queueFamilyIndex = family;
+                  queueInfo.queueCount = 1;
+                  queueInfo.pQueuePriorities = &priority;
+                  const char* extension = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+                  VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+                  deviceInfo.queueCreateInfoCount = 1;
+                  deviceInfo.pQueueCreateInfos = &queueInfo;
+                  deviceInfo.enabledExtensionCount = 1;
+                  deviceInfo.ppEnabledExtensionNames = &extension;
+                  VkDevice device;
+                  Check(vkCreateDevice(physical, &deviceInfo, nullptr, &device), "vkCreateDevice");
+                  VkQueue queue;
+                  vkGetDeviceQueue(device, family, 0, &queue);
+                  const auto alignment = std::max<VkDeviceSize>(host.minImportedHostPointerAlignment, 4096);
+                  const auto bytes = (16384 + alignment - 1) / alignment * alignment;
+                  auto* raw = mmap(nullptr, bytes + alignment, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                  if (raw == MAP_FAILED) throw std::runtime_error("mmap failed");
+                  const auto base = (reinterpret_cast<std::uintptr_t>(raw) + alignment - 1) / alignment * alignment;
+                  auto* pointer = reinterpret_cast<void*>(base);
+                  std::memset(pointer, 0x11, bytes);
+                  GuestWriteWatchRegister_nid_postfix(pointer, bytes);
+                  const auto collect = [&] {
+                      std::uint32_t written = 0;
+                      if (!GuestWriteWatchCollect_nid_postfix(base, bytes, [](void* context, std::uintptr_t begin, std::uintptr_t end) { *static_cast<std::uint32_t*>(context) += (end - begin) / 4096; }, &written)) throw std::runtime_error("collect failed");
+                      return written;
+                  };
+                  collect();
+                  if (collect()) throw std::runtime_error("unwritten memory is dirty");
+                  VkPhysicalDeviceMemoryProperties memoryProperties;
+                  vkGetPhysicalDeviceMemoryProperties(physical, &memoryProperties);
+                  const auto memoryType = [&](std::uint32_t bits) {
+                      for (std::uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i) {
+                          constexpr auto flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                          if ((bits & (1u << i)) && (memoryProperties.memoryTypes[i].propertyFlags & flags) == flags) return i;
+                      }
+                      throw std::runtime_error("no coherent host memory type");
+                  };
+                  const VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO, nullptr, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT};
+                  VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &external};
+                  bufferInfo.size = bytes;
+                  bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                  VkBuffer imported, destination;
+                  Check(vkCreateBuffer(device, &bufferInfo, nullptr, &imported), "vkCreateBuffer(import)");
+                  VkMemoryRequirements requirements;
+                  vkGetBufferMemoryRequirements(device, imported, &requirements);
+                  const auto getHost = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(vkGetDeviceProcAddr(device, "vkGetMemoryHostPointerPropertiesEXT"));
+                  if (!getHost) throw std::runtime_error("host import function unavailable");
+                  VkMemoryHostPointerPropertiesEXT hostTypes{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
+                  Check(getHost(device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pointer, &hostTypes), "vkGetMemoryHostPointerPropertiesEXT");
+                  const VkImportMemoryHostPointerInfoEXT import{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT, nullptr, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, pointer};
+                  VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &import};
+                  allocation.allocationSize = bytes;
+                  allocation.memoryTypeIndex = memoryType(requirements.memoryTypeBits & hostTypes.memoryTypeBits);
+                  VkDeviceMemory importedMemory, destinationMemory;
+                  Check(vkAllocateMemory(device, &allocation, nullptr, &importedMemory), "vkAllocateMemory(import)");
+                  Check(vkBindBufferMemory(device, imported, importedMemory, 0), "vkBindBufferMemory(import)");
+                  std::cout << "pages dirty after import: " << collect() << std::endl;
+                  bufferInfo.pNext = nullptr;
+                  Check(vkCreateBuffer(device, &bufferInfo, nullptr, &destination), "vkCreateBuffer(destination)");
+                  vkGetBufferMemoryRequirements(device, destination, &requirements);
+                  allocation.pNext = nullptr;
+                  allocation.allocationSize = requirements.size;
+                  allocation.memoryTypeIndex = memoryType(requirements.memoryTypeBits);
+                  Check(vkAllocateMemory(device, &allocation, nullptr, &destinationMemory), "vkAllocateMemory(destination)");
+                  Check(vkBindBufferMemory(device, destination, destinationMemory, 0), "vkBindBufferMemory(destination)");
+                  VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+                  poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+                  poolInfo.queueFamilyIndex = family;
+                  VkCommandPool pool;
+                  Check(vkCreateCommandPool(device, &poolInfo, nullptr, &pool), "vkCreateCommandPool");
+                  VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                  commandInfo.commandPool = pool;
+                  commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                  commandInfo.commandBufferCount = 1;
+                  VkCommandBuffer commands;
+                  Check(vkAllocateCommandBuffers(device, &commandInfo, &commands), "vkAllocateCommandBuffers");
+                  VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                  VkFence fence;
+                  Check(vkCreateFence(device, &fenceInfo, nullptr, &fence), "vkCreateFence");
+                  for (int pass = 0; pass < 2; ++pass) {
+                      VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                      Check(vkBeginCommandBuffer(commands, &begin), "vkBeginCommandBuffer");
+                      if (!pass) {
+                          const VkBufferCopy region{0, 0, bytes};
+                          vkCmdCopyBuffer(commands, imported, destination, 1, &region);
+                      } else {
+                          vkCmdFillBuffer(commands, imported, 0, bytes, 0x33333333);
+                          VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                          barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                          barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                          vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+                      }
+                      Check(vkEndCommandBuffer(commands), "vkEndCommandBuffer");
+                      VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                      submit.commandBufferCount = 1;
+                      submit.pCommandBuffers = &commands;
+                      Check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
+                      Check(vkWaitForFences(device, 1, &fence, VK_TRUE, 10000000000ull), "vkWaitForFences");
+                      std::cout << "pages dirty after GPU " << (pass ? "write: " : "read: ") << collect() << std::endl;
+                      if (pass && !std::all_of(static_cast<const std::uint8_t*>(pointer), static_cast<const std::uint8_t*>(pointer) + bytes, [](auto byte) { return byte == 0x33; })) throw std::runtime_error("GPU fill not visible");
+                      Check(vkResetFences(device, 1, &fence), "vkResetFences");
+                      Check(vkResetCommandBuffer(commands, 0), "vkResetCommandBuffer");
+                  }
+                  *static_cast<volatile std::uint8_t*>(pointer) = 0x44;
+                  const auto cpu = collect();
+                  std::cout << "pages dirty after CPU write: " << cpu << std::endl;
+                  if (!cpu) throw std::runtime_error("CPU write not tracked");
+                  vkDestroyFence(device, fence, nullptr);
+                  vkDestroyCommandPool(device, pool, nullptr);
+                  vkDestroyBuffer(device, destination, nullptr);
+                  vkFreeMemory(device, destinationMemory, nullptr);
+                  vkDestroyBuffer(device, imported, nullptr);
+                  vkFreeMemory(device, importedMemory, nullptr);
+                  GuestWriteWatchUnregister_nid_postfix(pointer, bytes);
+                  munmap(raw, bytes + alignment);
+                  vkDestroyDevice(device, nullptr);
+                  vkDestroyInstance(instance, nullptr);
+              } catch (const std::exception& error) {
+                  std::cerr << error.what() << '\n';
+                  return 1;
+              }
+          }
+          CPP
+          g++ -std=c++20 -O2 -I core/libs -I 3rdparty/Vulkan-Headers/include "$RUNNER_TEMP/import-watch.cpp" core/libs/prx/libc/src/GuestWriteWatch.cpp -l:libvulkan.so.1 -o "$RUNNER_TEMP/import-watch"
+          timeout 30 "$RUNNER_TEMP/import-watch"
