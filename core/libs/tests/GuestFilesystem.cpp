@@ -1,6 +1,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -50,13 +51,23 @@ std::int64_t APS5_VABI read_nid_postfix(int, void*, std::size_t);
 std::int64_t APS5_VABI write_nid_postfix(int, const void*, std::size_t);
 int APS5_VABI sceKernelDebugOutText(int, const char*);
 }
-static void Check(bool value, int line) {
+static void Check(bool value, const char* expression, int line) {
     if (!value) {
-        std::fprintf(stderr, "Filesystem check failed at line %d (guest errno %d)\n", line, *__error_nid_postfix());
+#ifdef _WIN32
+        const auto win32Error = GetLastError();
+#endif
+        const int hostError = errno;
+        const int guestError = *__error_nid_postfix();
+        std::fprintf(stderr, "Filesystem check failed at line %d: %s\n", line, expression);
+        std::fprintf(stderr, "Last error values: guest errno %d, host errno %d", guestError, hostError);
+#ifdef _WIN32
+        std::fprintf(stderr, ", Win32 error %lu", static_cast<unsigned long>(win32Error));
+#endif
+        std::fputc('\n', stderr);
         std::abort();
     }
 }
-#define Require(value) Check((value), __LINE__)
+#define Require(value) Check((value), #value, __LINE__)
 int main() {
     Require(sceKernelDebugOutText(-1, "text") == static_cast<int>(0x80020016u));
     std::uint64_t throttling[4] = {1, 2, 3, 4};
