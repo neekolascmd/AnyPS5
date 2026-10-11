@@ -118,6 +118,25 @@ jobs:
           GALLIUM_OVERRIDE_CPU_CAPS: avx
       - if: ${{ !cancelled() && hashFiles('build/ctest.xml') != '' }}
         run: python tools/check_skips.py build/ctest.xml --job ${{ matrix.job }}
+      - if: ${{ !cancelled() && runner.os == 'Linux' && hashFiles('build/ctest.xml') != '' }}
+        name: Capture uploads for a failing packed-texture test
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          failed = any(case.get('name') == 'agc_driver_image_packed16_load' and case.find('failure') is not None
+                       for case in ET.parse('build/ctest.xml').getroot().iter('testcase'))
+          if not failed:
+              sys.exit(0)
+          result = subprocess.run(['ctest', '--test-dir', 'build', '-R', '^agc_driver_image_packed16_load$',
+                                   '--output-on-failure', '--timeout', '30', '--no-tests=error',
+                                   '--output-log', 'packed-texture-diagnostic.log'],
+                                  env={**os.environ, 'APS5_DUMP_TEXTURE': '256x1', 'GALLIUM_OVERRIDE_CPU_CAPS': 'avx'})
+          sys.exit(result.returncode)
+          PY
       - if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
@@ -125,6 +144,8 @@ jobs:
           path: |
             ctest.log
             kernel-ctest.log
+            packed-texture-diagnostic.log
+            texture_*.raw
             build/ctest.xml
             build/kernel-ctest.xml
             build/Testing/Temporary/
