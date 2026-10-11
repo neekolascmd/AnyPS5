@@ -101,6 +101,15 @@ jobs:
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           ${{ matrix.configure }}
       - run: python tools/check_test_registration.py build
+      - name: Build the changed kernel tests first
+        run: >-
+          cmake --build build --parallel 3 --target
+          guest_equeue_event_tests guest_socket_event_tests guest_pthread_attr_tests guest_filesystem_tests
+      - name: Validate the kernel contributions
+        run: >-
+          ctest --test-dir build -R '^guest_(equeue_events|socket_events|pthread_attr|filesystem)$'
+          --output-on-failure --timeout 30 --parallel 2 --no-tests=error
+          --output-log kernel-ctest.log --output-junit kernel-ctest.xml
       - run: cmake --build build --parallel 3
       - run: cmake --build build --target libs --parallel 3
       - name: Test the complete runtime
@@ -115,6 +124,8 @@ jobs:
           name: runtime-${{ matrix.job }}-logs
           path: |
             ctest.log
+            kernel-ctest.log
             build/ctest.xml
+            build/kernel-ctest.xml
             build/Testing/Temporary/
             build/CMakeFiles/CMakeConfigureLog.yaml
