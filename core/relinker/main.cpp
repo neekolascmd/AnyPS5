@@ -55,10 +55,33 @@ bool PathsReferToSameFile(const std::filesystem::path& first, const std::filesys
     const auto secondPath = ResolveOutputPath(second);
     if (firstPath == secondPath) return true;
     if (!std::filesystem::exists(firstPath) || !std::filesystem::exists(secondPath)) return false;
+#ifdef _WIN32
+    const auto open = [](const std::filesystem::path& path) {
+        const auto handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const auto error = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+            throw Domain::RelinkerException("Cannot verify registry output path: " + Io::Utf8Path(path) + ": " + error.message());
+        }
+        const auto close = [](void* file) { CloseHandle(file); };
+        return std::unique_ptr<void, decltype(close)>(handle, close);
+    };
+    const auto firstHandle = open(firstPath);
+    const auto secondHandle = open(secondPath);
+    BY_HANDLE_FILE_INFORMATION firstInfo{};
+    BY_HANDLE_FILE_INFORMATION secondInfo{};
+    if (!GetFileInformationByHandle(firstHandle.get(), &firstInfo) || !GetFileInformationByHandle(secondHandle.get(), &secondInfo)) {
+        const auto error = std::error_code(static_cast<int>(GetLastError()), std::system_category());
+        throw Domain::RelinkerException("Cannot verify registry output file identity: " + error.message());
+    }
+    return firstInfo.dwVolumeSerialNumber == secondInfo.dwVolumeSerialNumber
+        && firstInfo.nFileIndexHigh == secondInfo.nFileIndexHigh && firstInfo.nFileIndexLow == secondInfo.nFileIndexLow;
+#else
     std::error_code error;
     const auto same = std::filesystem::equivalent(firstPath, secondPath, error);
     if (error) throw Domain::RelinkerException("Cannot verify registry output path: " + Io::Utf8Path(firstPath) + ": " + error.message());
     return same;
+#endif
 }
 
 int Run(const int argc, char* argv[]) {

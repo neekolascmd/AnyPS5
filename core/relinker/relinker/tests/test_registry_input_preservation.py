@@ -39,7 +39,7 @@ def main():
                         sample.write_bytes(guest_fixture(PLAIN_SITE))
                         output_directory = modules if bundled else case
                         registry = output_directory / registry_name
-                        source = case / "input.elf"
+                        source = case / ("input.exe" if windows else "input.elf")
                         if bundled:
                             source.write_bytes(main_fixture())
                             protected = registry if alias in ("direct", "normalized") else modules / "protected.prx"
