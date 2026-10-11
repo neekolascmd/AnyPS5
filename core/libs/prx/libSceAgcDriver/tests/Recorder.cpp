@@ -4833,6 +4833,10 @@ int main(int argc, char** argv) {
                 std::cout << "skipped, unit shadows or host imports are unavailable\n";
                 return 77;
             }
+            if (PrepareImportWatch(device.GetContext()) == ImportWatch::Unwatch) {
+                std::cout << "skipped, the device reports host imports requiring byte comparisons\n";
+                return 77;
+            }
             unitShadowTests(device, recorder);
             return 0;
         }
