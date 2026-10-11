@@ -2,7 +2,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <source_location>
 #include <stdexcept>
 #include <thread>
 
@@ -23,6 +25,8 @@ int APS5_VABI sceKernelAddReadEvent(KernelEqueue eq, int fd, std::size_t size, v
 int APS5_VABI sceKernelDeleteReadEvent(KernelEqueue eq, int fd);
 int APS5_VABI sceKernelAddWriteEvent(KernelEqueue eq, int fd, std::size_t size, void* udata);
 int APS5_VABI sceKernelDeleteWriteEvent(KernelEqueue eq, int fd);
+int APS5_VABI sceKernelAddUserEvent(KernelEqueue eq, int id);
+int APS5_VABI sceKernelTriggerUserEvent(KernelEqueue eq, int id, void* udata);
 }
 
 static constexpr int SCE_OK = 0;
@@ -31,9 +35,15 @@ static constexpr int SCE_KERNEL_ERROR_EBADF = static_cast<int>(0x80020009);
 static constexpr int SCE_KERNEL_ERROR_ETIMEDOUT = static_cast<int>(0x8002003c);
 static constexpr int EVFILT_READ = -1;
 static constexpr int EVFILT_WRITE = -2;
+static constexpr int EVFILT_USER = -11;
 static constexpr std::uint16_t EV_EOF = 0x8000;
 
-static void Require(bool value) { if (!value) std::abort(); }
+static void Require(bool value, const std::source_location location = std::source_location::current()) {
+    if (!value) {
+        std::fprintf(stderr, "Failed check at %s:%u\n", location.file_name(), location.line());
+        std::abort();
+    }
+}
 
 static bool Rejects(int (APS5_VABI *add)(KernelEqueue, int, std::size_t, void*), KernelEqueue eq, int fd, std::size_t size) {
     try {
@@ -42,6 +52,39 @@ static bool Rejects(int (APS5_VABI *add)(KernelEqueue, int, std::size_t, void*),
         return true;
     }
     return false;
+}
+
+static void VerifyFairSocketDelivery(int writer, int reader) {
+    const KernelUseconds poll = 0;
+    const KernelUseconds wait = 1000000;
+    for (const auto timeout : {&poll, &wait, static_cast<const KernelUseconds*>(nullptr)}) {
+        KernelEqueue eq = 0;
+        Require(sceKernelCreateEqueue(&eq, "fair-sockets") == SCE_OK);
+        Require(sceKernelAddUserEvent(eq, 7) == SCE_OK);
+        Require(sceKernelTriggerUserEvent(eq, 7, nullptr) == SCE_OK);
+        Require(sceKernelAddWriteEvent(eq, writer, 0, nullptr) == SCE_OK);
+        Require(sceKernelAddReadEvent(eq, reader, 1, nullptr) == SCE_OK);
+        const char sent = 'x';
+        char received = 0;
+        Require(send_nid_postfix(writer, &sent, 1, 0) == 1);
+        Require(recv_nid_postfix(reader, &received, 1, 2) == 1 && received == sent);
+        for (int round = 0; round < 2; ++round) {
+            std::array<bool, 3> seen{};
+            for (int call = 0; call < 3; ++call) {
+                KernelEvent event{};
+                int count = 0;
+                Require(sceKernelWaitEqueue(eq, &event, 1, &count, timeout) == SCE_OK && count == 1);
+                int slot = -1;
+                if (event.ident == 7 && event.filter == EVFILT_USER) slot = 0;
+                if (event.ident == static_cast<std::uintptr_t>(writer) && event.filter == EVFILT_WRITE) slot = 1;
+                if (event.ident == static_cast<std::uintptr_t>(reader) && event.filter == EVFILT_READ) slot = 2;
+                Require(slot >= 0 && !seen[slot]);
+                seen[slot] = true;
+            }
+        }
+        Require(recv_nid_postfix(reader, &received, 1, 0) == 1 && received == sent);
+        Require(sceKernelDeleteEqueue(eq) == SCE_OK);
+    }
 }
 
 int main() {
@@ -77,6 +120,7 @@ int main() {
     Require(accepted >= 0);
     Require(sceKernelDeleteReadEvent(eq, listener) == SCE_OK);
     Require(sceKernelDeleteReadEvent(eq, listener) == SCE_KERNEL_ERROR_ENOENT);
+    VerifyFairSocketDelivery(client, accepted);
 
     Require(sceKernelAddWriteEvent(eq, client, 0, nullptr) == SCE_OK);
     Require(sceKernelWaitEqueue(eq, events.data(), events.size(), &count, &timeout) == SCE_OK);

@@ -1,7 +1,11 @@
 #include "SceTypes.hpp"
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <source_location>
 #include <stdexcept>
 #include <thread>
 
@@ -35,7 +39,12 @@ static constexpr int EVFILT_USER = -11;
 static constexpr int EVFILT_HRTIMER = -15;
 static constexpr int EVFILT_AMPR = -25;
 
-static void Require(bool value) { if (!value) std::abort(); }
+static void Require(bool value, const std::source_location location = std::source_location::current()) {
+    if (!value) {
+        std::fprintf(stderr, "Failed check at %s:%u\n", location.file_name(), location.line());
+        std::abort();
+    }
+}
 
 template <typename TResult>
 static bool RejectsNull(TResult (APS5_VABI *accessor)(const KernelEvent*)) {
@@ -243,12 +252,93 @@ static void VerifyRepeatedAmprCompletionsAreNotLost() {
     Require(sceKernelDeleteEqueue(eq) == SCE_OK);
 }
 
+static void VerifyLevelEventFairness() {
+    const KernelUseconds poll = 0;
+    const KernelUseconds wait = 1000000;
+    for (const int capacity : {1, 2, 3, 8}) {
+        for (const auto timeout : {&poll, &wait, static_cast<const KernelUseconds*>(nullptr)}) {
+            KernelEqueue eq = 0;
+            Require(sceKernelCreateEqueue(&eq, "fair") == SCE_OK);
+            int payload = 0;
+            Require(sceKernelAddUserEvent(eq, 1) == SCE_OK);
+            for (int id = 10; id < 15; ++id) {
+                Require(sceKernelAddUserEvent(eq, id) == SCE_OK);
+                Require(sceKernelTriggerUserEvent(eq, id, &payload) == SCE_OK);
+            }
+            Require(sceKernelAddUserEvent(eq, 99) == SCE_OK);
+            for (int trigger = 0; trigger < 50; ++trigger) {
+                Require(sceKernelTriggerUserEvent(eq, 10, &payload) == SCE_OK);
+            }
+            std::array<int, 5> visits{};
+            for (int call = 0; call < 10; ++call) {
+                std::array<KernelEvent, 8> events{};
+                int count = 0;
+                Require(sceKernelWaitEqueue(eq, events.data(), capacity, &count, timeout) == SCE_OK);
+                Require(count == std::min(capacity, 5));
+                std::array<bool, 5> seen{};
+                for (int index = 0; index < count; ++index) {
+                    const auto& event = events[index];
+                    Require(event.ident >= 10 && event.ident < 15 && event.filter == EVFILT_USER);
+                    const auto slot = event.ident - 10;
+                    Require(!seen[slot] && event.udata == &payload);
+                    seen[slot] = true;
+                    ++visits[slot];
+                }
+            }
+            for (const auto count : visits) Require(count == 2 * std::min(capacity, 5));
+            Require(sceKernelDeleteEqueue(eq) == SCE_OK);
+        }
+    }
+}
+
+static void VerifyMixedEventFairness() {
+    KernelEqueue eq = 0;
+    Require(sceKernelCreateEqueue(&eq, "mixed-fair") == SCE_OK);
+    int payload = 0;
+    Require(sceKernelAddUserEvent(eq, 1) == SCE_OK);
+    Require(sceKernelAddUserEvent(eq, 2) == SCE_OK);
+    Require(sceKernelTriggerUserEvent(eq, 1, &payload) == SCE_OK);
+    Require(sceKernelTriggerUserEvent(eq, 2, &payload) == SCE_OK);
+    Require(sceKernelAddAmprEvent(eq, 3, &payload) == SCE_OK);
+    for (std::uintptr_t value : {0x11, 0x22, 0x33}) {
+        Require(EqueueTriggerEvent_nid_postfix(eq, 3, EVFILT_AMPR, reinterpret_cast<void*>(value)) == SCE_OK);
+    }
+    Require(sceKernelAddUserEventEdge(eq, 4) == SCE_OK);
+    Require(sceKernelTriggerUserEvent(eq, 4, &payload) == SCE_OK);
+    const KernelTimespec immediate{0, 0};
+    Require(sceKernelAddHRTimerEvent(eq, 5, &immediate, &payload) == SCE_OK);
+    const KernelUseconds poll = 0;
+    std::array<int, 5> visits{};
+    for (int call = 0; call < 15; ++call) {
+        KernelEvent event{};
+        int count = 0;
+        Require(sceKernelWaitEqueue(eq, &event, 1, &count, &poll) == SCE_OK && count == 1);
+        Require(event.ident >= 1 && event.ident <= 5 && event.udata == &payload);
+        const auto slot = event.ident - 1;
+        if (call < 5) Require(visits[slot] == 0);
+        if (event.ident == 3) {
+            Require(event.filter == EVFILT_AMPR && event.data == (visits[slot] + 1) * 0x11);
+        }
+        if (event.ident == 5) Require(event.filter == EVFILT_HRTIMER);
+        ++visits[slot];
+    }
+    Require(visits[0] > 1 && visits[1] > 1 && visits[2] == 3 && visits[3] == 1 && visits[4] == 1);
+    Require(sceKernelDeleteUserEvent(eq, 1) == SCE_OK);
+    Require(sceKernelDeleteUserEvent(eq, 2) == SCE_OK);
+    KernelEvent event{};
+    int count = 0;
+    Require(sceKernelWaitEqueue(eq, &event, 1, &count, &poll) == SCE_KERNEL_ERROR_ETIMEDOUT && count == 0);
+    Require(sceKernelDeleteEqueue(eq) == SCE_OK);
+}
+
 int main() {
     VerifyPeriodicTimer();
     VerifyUserEventReportedOncePerWait();
     VerifyBlockingWaitReportsLevelEventOnce();
     VerifyEdgeUserEventReportedOnce();
     VerifyRepeatedAmprCompletionsAreNotLost();
+    VerifyLevelEventFairness();
+    VerifyMixedEventFairness();
 
     KernelEqueue eq = 0;
     Require(sceKernelCreateEqueue(&eq, "events") == SCE_OK);
